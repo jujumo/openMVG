@@ -22,6 +22,7 @@
 #include "third_party/progress/progress_display.hpp"
 #include "third_party/stlplus3/filesystemSimplified/file_system.hpp"
 
+#include <algorithm>
 #include <iomanip>
 #include <cstdlib>
 #include <sstream>
@@ -33,6 +34,10 @@ using namespace openMVG::image;
 using namespace openMVG::sfm;
 using namespace openMVG::features;
 
+static const std::string SEP = ", ";
+static const std::string KAPTURE_SENSOR_DIR = "sensors";
+static const std::string KAPTURE_RECONSTRUCTION_DIR = "reconstruction";
+
 bool CreateLineCameraFile(  const IndexT camera_id,
                             std::shared_ptr<openMVG::cameras::IntrinsicBase> intrinsic,
                             std::string & camera_linie)
@@ -40,7 +45,6 @@ bool CreateLineCameraFile(  const IndexT camera_id,
   // kapture sensors.txt is formated like:
   // sensor_device_id, name, sensor_type, [sensor_params]+
   std::stringstream came_line_ss;
-  const std::string SEP = ", ";
   came_line_ss << camera_id << SEP << "cam_" << camera_id << SEP;
   EINTRINSIC current_type = intrinsic->getType();
   switch(current_type)
@@ -142,7 +146,7 @@ bool CreateSensorsFile( const SfM_Data & sfm_data,
   sensors_file << "# sensor_id, name, sensor_type, [sensor_params]+\n";
 
   std::vector<std::string> camera_lines;
-  C_Progress_display my_progress_bar( sfm_data.GetIntrinsics().size(), std::cout, "\n- CREATE CAMERA FILE -\n" );
+  C_Progress_display my_progress_bar( sfm_data.GetIntrinsics().size(), std::cout, "\n- CREATE SENSORS FILE -\n" );
   for (Intrinsics::const_iterator iter = sfm_data.GetIntrinsics().begin();
     iter != sfm_data.GetIntrinsics().end(); ++iter, ++my_progress_bar)
   {
@@ -186,7 +190,7 @@ bool CreateRecordsCameraFile( const SfM_Data & sfm_data,
   records_camera_file << "# timestamp, device_id, image_path\n";
 
   {
-    C_Progress_display my_progress_bar( sfm_data.GetViews().size(), std::cout, "\n- CREATE records_camera FILE -\n" );
+    C_Progress_display my_progress_bar( sfm_data.GetViews().size(), std::cout, "\n- CREATE RECORDS CAMERA FILE -\n" );
 
     for (Views::const_iterator iter = sfm_data.GetViews().begin();
          iter != sfm_data.GetViews().end(); ++iter, ++my_progress_bar)
@@ -195,13 +199,115 @@ bool CreateRecordsCameraFile( const SfM_Data & sfm_data,
       const std::string & image_name = view->s_Img_path;
       const IndexT timestamp = view->id_view; // since there is no timestamp in openMVG, consider each view at a different timestamp.
       const IndexT camera_id = view->id_intrinsic;
-      records_camera_file << timestamp << ", "
-                          << camera_id  << ", "
+      records_camera_file << timestamp << SEP
+                          << camera_id  << SEP
                           << sfm_data.s_root_path + image_name << std::endl;
     }
   }
 
   return true;
+}
+
+
+bool CreateTrajectoriesFile( const SfM_Data & sfm_data,
+                             const std::string & sTrajectoriesFilename)
+{
+   /* sensors/trajectories.txt
+      # Each line of the file is composed of :
+      timestamp, device_id, qw, qx, qy, qz, tx, ty, tz
+  */
+  std::ofstream trajectories_file( sTrajectoriesFilename );
+  if ( ! trajectories_file )
+  {
+    std::cerr << "Cannot write file " << sTrajectoriesFilename << std::endl;
+    return false;
+  }
+
+  trajectories_file << "# kapture format: 1.0" << std::endl;
+  trajectories_file << "# timestamp, device_id, qw, qx, qy, qz, tx, ty, tz" << std::endl;
+
+  {
+    C_Progress_display my_progress_bar( sfm_data.GetViews().size(), std::cout, "\n- CREATE TRAJECTORIES FILE -\n" );
+
+    for (Views::const_iterator iter = sfm_data.GetViews().begin();
+         iter != sfm_data.GetViews().end(); ++iter, ++my_progress_bar)
+    {
+      const View * view = iter->second.get();
+      if ( !sfm_data.IsPoseAndIntrinsicDefined( view ) )
+      {
+        continue; // skip if no extrinsic
+      }
+      const IndexT timestamp = view->id_view; // since there is no timestamp in openMVG, consider each view at a different timestamp.
+      const IndexT camera_id = view->id_intrinsic;
+
+      const Pose3 pose = sfm_data.GetPoseOrDie( view );
+      const Mat3 rotation = pose.rotation();
+      const Vec3 translation = pose.translation();
+      const double tx = translation[0];
+      const double ty = translation[1];
+      const double tz = translation[2];
+      Eigen::Quaterniond q( rotation );
+      const double qx = q.x();
+      const double qy = q.y();
+      const double qz = q.z();
+      const double qw = q.w();
+
+      trajectories_file << timestamp << SEP
+                        << camera_id  << SEP
+                        << qw << SEP << qx << SEP << qy << SEP << qz << SEP
+                        << tx << SEP << ty << SEP << tz << std::endl;
+    }
+  }
+
+  return true;
+}
+
+static bool key_compare(const std::pair<int, Landmark>& a, const std::pair<int, Landmark>& b)
+{
+    return (a.first < b.first);
+}
+
+bool CreatePoints3dFile( const SfM_Data & sfm_data,
+                         const std::string & sPoints3dFilename)
+{
+    /* reconstruction/points3d.txt
+       # Each line of the file is composed of :
+        X, Y, Z, [R, G, B]
+   */
+    const Landmarks landmarks = sfm_data.GetLandmarks();
+    if (landmarks.size() == 0) {
+        std::cout << "\n- NO POINT3D FILE  -\n";
+        return true;
+    }
+
+    std::ofstream points3d_file( sPoints3dFilename );
+    if ( ! points3d_file )
+    {
+      std::cerr << "Cannot write file " << sPoints3dFilename << std::endl;
+      return false;
+    }
+
+    points3d_file << "# kapture format: 1.0" << std::endl;
+    points3d_file << "# X, Y, Z, [R, G, B]" << std::endl;
+
+    std::vector<Vec3> vec_3dPoints, vec_tracksColor;
+    if (!ColorizeTracks(sfm_data, vec_3dPoints, vec_tracksColor)) {
+      return false;
+    }
+
+    C_Progress_display my_progress_bar( vec_3dPoints.size(), std::cout, "\n- CREATE POINT3D FILE  -\n" );
+    for (size_t point3d_idx = 0 ; point3d_idx < vec_3dPoints.size() ; ++point3d_idx, ++my_progress_bar) {
+        const Vec3 coords = vec_3dPoints[point3d_idx];
+        const Vec3 color = vec_tracksColor[point3d_idx];
+        points3d_file << coords.x() << SEP
+                      << coords.y() << SEP
+                      << coords.z() << SEP
+                      << color.x() << SEP
+                      << color.y() << SEP
+                      << color.z()
+                      << std::endl;
+    }
+    return true;
 }
 
 /**
@@ -212,16 +318,32 @@ bool CreateRecordsCameraFile( const SfM_Data & sfm_data,
 bool CreateKaptureFolder( const SfM_Data & sfm_data,
                          const std::string & sOutDirectory)
 {
-  // sensors (cameras instrinsics)
-  const std::string sSensorsFilename = stlplus::create_filespec( sOutDirectory , "sensors/sensors.txt" );
+  const std::string sSensorsDirpath = sOutDirectory + "/" + KAPTURE_SENSOR_DIR + "/";
+  // sensors/sensors (cameras instrinsics)
+  const std::string sSensorsFilename = stlplus::create_filespec( sSensorsDirpath , "sensors.txt" );
   if (!CreateSensorsFile(sfm_data, sSensorsFilename))
   {
     return false;
   }
 
-  // records_camera (images)
-  const std::string sRecordsCameraFilename = stlplus::create_filespec( sOutDirectory , "sensors/records_camera.txt" );
+  // sensors/records_camera (images)
+  const std::string sRecordsCameraFilename = stlplus::create_filespec( sSensorsDirpath, "records_camera.txt" );
   if (!CreateRecordsCameraFile(sfm_data, sRecordsCameraFilename))
+  {
+    return false;
+  }
+
+  // sensors/trajectories (extrinsics)
+  const std::string sTrajectoriesFilename = stlplus::create_filespec( sSensorsDirpath , "trajectories.txt" );
+  if (!CreateTrajectoriesFile(sfm_data, sTrajectoriesFilename))
+  {
+    return false;
+  }
+
+  const std::string sReconstructionDirpath = sOutDirectory + "/" + KAPTURE_RECONSTRUCTION_DIR + "/";
+  // reconstruction/points3d
+  const std::string sPoints3dFilename = stlplus::create_filespec( sReconstructionDirpath , "points3d.txt" );
+  if (!CreatePoints3dFile(sfm_data, sPoints3dFilename))
   {
     return false;
   }
