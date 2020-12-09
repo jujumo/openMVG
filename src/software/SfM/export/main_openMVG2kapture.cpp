@@ -167,6 +167,43 @@ bool CreateSensorsFile( const SfM_Data & sfm_data,
 }
 
 
+
+bool CreateRecordsCameraFile( const SfM_Data & sfm_data,
+                              const std::string & sRecordsCameraFilename)
+{
+   /* sensors/records_camera.txt
+      # Each line of the file is composed of :
+      timestamp, device_id, image_path
+  */
+  std::ofstream records_camera_file( sRecordsCameraFilename );
+  if ( ! records_camera_file )
+  {
+    std::cerr << "Cannot write file " << sRecordsCameraFilename << std::endl;
+    return false;
+  }
+
+  records_camera_file << "# kapture format: 1.0\n";
+  records_camera_file << "# timestamp, device_id, image_path\n";
+
+  {
+    C_Progress_display my_progress_bar( sfm_data.GetViews().size(), std::cout, "\n- CREATE records_camera FILE -\n" );
+
+    for (Views::const_iterator iter = sfm_data.GetViews().begin();
+         iter != sfm_data.GetViews().end(); ++iter, ++my_progress_bar)
+    {
+      const View * view = iter->second.get();
+      const std::string & image_name = view->s_Img_path;
+      const IndexT timestamp = view->id_view; // since there is no timestamp in openMVG, consider each view at a different timestamp.
+      const IndexT camera_id = view->id_intrinsic;
+      records_camera_file << timestamp << ", "
+                          << camera_id  << ", "
+                          << sfm_data.s_root_path + image_name << std::endl;
+    }
+  }
+
+  return true;
+}
+
 /**
 * @brief Convert OpenMVG reconstruction result to kapture's format.
 * @param sfm_data Structure from Motion file
@@ -175,12 +212,20 @@ bool CreateSensorsFile( const SfM_Data & sfm_data,
 bool CreateKaptureFolder( const SfM_Data & sfm_data,
                          const std::string & sOutDirectory)
 {
+  // sensors (cameras instrinsics)
   const std::string sSensorsFilename = stlplus::create_filespec( sOutDirectory , "sensors/sensors.txt" );
-
   if (!CreateSensorsFile(sfm_data, sSensorsFilename))
   {
     return false;
   }
+
+  // records_camera (images)
+  const std::string sRecordsCameraFilename = stlplus::create_filespec( sOutDirectory , "sensors/records_camera.txt" );
+  if (!CreateRecordsCameraFile(sfm_data, sRecordsCameraFilename))
+  {
+    return false;
+  }
+
   return true;
 }
 
@@ -198,7 +243,6 @@ bool exportToKapture( const SfM_Data & sfm_data , const std::string & sOutDirect
   };
 
   for (auto output_dirpath : output_dir_list) {
-      //std::cout << "DEBUG : "<< output_dirpath << std::endl;
       if ( !stlplus::is_folder( output_dirpath ) )
       {
         std::cout << "\033[1;31mCreating kapture directory in :  " << output_dirpath << "\033[0m\n";
